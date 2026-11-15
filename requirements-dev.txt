@@ -1,0 +1,5 @@
+boto3
+moto[dynamodb,s3,stepfunctions]
+pytest
+pyyaml
+aws-sam-cli

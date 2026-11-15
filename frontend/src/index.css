@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, "Noto Sans Sinhala", "Noto Sans Tamil", sans-serif;
+}
+
+@layer components {
+  .btn-primary, .btn-outline, .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary { @apply bg-green-700 text-white hover:bg-green-800; }
+  .btn-outline { @apply border border-gray-300 bg-white text-gray-800 hover:bg-gray-50; }
+  .btn-danger { @apply border border-red-200 bg-white text-red-700 hover:bg-red-50; }
+  .card { @apply rounded-xl border border-gray-200 bg-white shadow-sm; }
+  .input { @apply w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-green-600 focus:outline-none focus:ring-2 focus:ring-green-600/20; }
+  .label { @apply mb-1 block text-sm font-medium text-gray-700; }
+}
