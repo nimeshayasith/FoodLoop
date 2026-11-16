@@ -1,0 +1,492 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  FoodLoop - surplus food donation and smart deals platform.
+  100% serverless: S3 + CloudFront, API Gateway, Lambda, DynamoDB, Step Functions, Cognito.
+
+Parameters:
+  AutoApproveOrgs:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      "true" (challenge/demo): businesses and charities are approved the moment they register.
+      "false" (production): they stay PENDING until an admin approves them.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [arm64]
+    Timeout: 10
+    MemorySize: 256
+    CodeUri: backend/
+    Environment:
+      Variables:
+        LISTINGS_TABLE: !Ref ListingsTable
+        RESERVATIONS_TABLE: !Ref ReservationsTable
+        PROFILES_TABLE: !Ref ProfilesTable
+        IMPACT_TABLE: !Ref ImpactTable
+        IMAGE_BUCKET: !Ref ImageBucket
+        AUTO_APPROVE_ORGS: !Ref AutoApproveOrgs
+
+Resources:
+  # ====================================================================== DynamoDB
+  ListingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - { AttributeName: listingId, AttributeType: S }
+        - { AttributeName: status, AttributeType: S }
+        - { AttributeName: ownerId, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: listingId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: ByStatus
+          KeySchema:
+            - { AttributeName: status, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: ByOwner
+          KeySchema:
+            - { AttributeName: ownerId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  ReservationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - { AttributeName: reservationId, AttributeType: S }
+        - { AttributeName: userId, AttributeType: S }
+        - { AttributeName: listingId, AttributeType: S }
+        - { AttributeName: pickupCode, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: reservationId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: ByUser
+          KeySchema:
+            - { AttributeName: userId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: ByListing
+          KeySchema:
+            - { AttributeName: listingId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: ByPickupCode
+          KeySchema:
+            - { AttributeName: pickupCode, KeyType: HASH }
+          Projection: { ProjectionType: ALL }
+
+  ProfilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - { AttributeName: userId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: userId, KeyType: HASH }
+
+  ImpactTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: metric, AttributeType: S }
+      KeySchema:
+        - { AttributeName: metric, KeyType: HASH }
+
+  # ============================================================== Cognito (sign-in)
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - { Name: verified_email, Priority: 1 }
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+        EmailSubject: Your FoodLoop verification code
+        EmailMessage: "Your FoodLoop verification code is {####}"
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: foodloop-web
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: admin
+      Description: FoodLoop administrators (approve businesses and charities)
+
+  # ============================================== S3 + CloudFront (web app and images)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          # Browser uploads use short-lived presigned POST policies, which fix the key, type and size.
+          - AllowedMethods: [POST]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: FoodLoop web app and food images
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: FrontendOrigin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig: { OriginAccessIdentity: "" }
+          - Id: ImageOrigin
+            DomainName: !GetAtt ImageBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig: { OriginAccessIdentity: "" }
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+        CacheBehaviors:
+          - PathPattern: images/*
+            TargetOriginId: ImageOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  ImageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ImageBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${ImageBucket.Arn}/images/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # ================================================================== API Gateway
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub "https://${Distribution.DomainName}"
+          - http://localhost:5173
+        AllowHeaders: [authorization, content-type]
+        AllowMethods: [GET, POST, PUT, OPTIONS]
+        MaxAge: 600
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
+      Auth:
+        DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+              audience:
+                - !Ref UserPoolClient
+
+  # ================================================================ Lambda: public
+  ListListingsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.list_listings.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ListingsTable }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /listings, Method: GET, Auth: { Authorizer: NONE } }
+
+  GetListingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.get_listing.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ListingsTable }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/listings/{id}", Method: GET, Auth: { Authorizer: NONE } }
+
+  StatsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.stats.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ImpactTable }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /stats, Method: GET, Auth: { Authorizer: NONE } }
+
+  # ============================================================ Lambda: signed-in
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.profile.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ProfilesTable }
+      Events:
+        Get:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /me, Method: GET }
+        Put:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /me, Method: PUT }
+
+  ReserveListingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.reserve_listing.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ListingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ReservationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ProfilesTable }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/listings/{id}/reserve", Method: POST }
+
+  MyReservationsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.my_reservations.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ReservationsTable }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /me/reservations, Method: GET }
+
+  CancelReservationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.cancel_reservation.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ListingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ReservationsTable }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/reservations/{id}/cancel", Method: POST }
+
+  # ================================================================ Lambda: business
+  PresignUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.presign_upload.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ProfilesTable }
+        - S3WritePolicy: { BucketName: !Ref ImageBucket }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /uploads/presign, Method: POST }
+
+  CreateListingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.create_listing.handler
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref ListingLifecycleStateMachine
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ListingsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ProfilesTable }
+        - StepFunctionsExecutionPolicy: { StateMachineName: !GetAtt ListingLifecycleStateMachine.Name }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /listings, Method: POST }
+
+  OrgListingsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.org_listings.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ListingsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ReservationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ProfilesTable }
+      Events:
+        List:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /org/listings, Method: GET }
+        Reservations:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/org/listings/{id}/reservations", Method: GET }
+
+  VerifyPickupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.verify_pickup.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ReservationsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ListingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ImpactTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ProfilesTable }
+      Events:
+        Api:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /pickup/verify, Method: POST }
+
+  # ==================================================================== Lambda: admin
+  AdminFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.admin.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ProfilesTable }
+      Events:
+        List:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /admin/profiles, Method: GET }
+        Decide:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: "/admin/profiles/{userId}/decision", Method: POST }
+
+  # ============================================ Lambda: called by Step Functions only
+  CheckInventoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.check_inventory.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ListingsTable }
+
+  ConvertToDonationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.convert_to_donation.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ListingsTable }
+
+  ExpireListingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.expire_listing.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ListingsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ReservationsTable }
+
+  # ============================================================ Step Functions workflow
+  ListingLifecycleStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Type: STANDARD # Standard workflows can wait up to a year; Express stops at 5 minutes
+      DefinitionUri: workflows/listing_lifecycle.asl.json
+      DefinitionSubstitutions:
+        CheckInventoryFunctionArn: !GetAtt CheckInventoryFunction.Arn
+        ConvertToDonationFunctionArn: !GetAtt ConvertToDonationFunction.Arn
+        ExpireListingFunctionArn: !GetAtt ExpireListingFunction.Arn
+      Policies:
+        - LambdaInvokePolicy: { FunctionName: !Ref CheckInventoryFunction }
+        - LambdaInvokePolicy: { FunctionName: !Ref ConvertToDonationFunction }
+        - LambdaInvokePolicy: { FunctionName: !Ref ExpireListingFunction }
+
+Outputs:
+  SiteUrl:
+    Description: Public FoodLoop web app (CloudFront)
+    Value: !Sub "https://${Distribution.DomainName}"
+  ApiUrl:
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  Region:
+    Value: !Ref AWS::Region
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  ImageBucketName:
+    Value: !Ref ImageBucket
+  DistributionId:
+    Value: !Ref Distribution
+  ImageBaseUrl:
+    Value: !Sub "https://${Distribution.DomainName}"
+  StateMachineArn:
+    Value: !Ref ListingLifecycleStateMachine
+  ListingsTableName:
+    Value: !Ref ListingsTable
+  ReservationsTableName:
+    Value: !Ref ReservationsTable
+  ProfilesTableName:
+    Value: !Ref ProfilesTable

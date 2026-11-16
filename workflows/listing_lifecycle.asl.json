@@ -1,0 +1,116 @@
+{
+  "Comment": "FoodLoop listing lifecycle: wait for the sale deadline, check stock, optionally convert leftovers to a donation, wait for the final collection deadline, then close the listing.",
+  "StartAt": "WhichListingType",
+  "States": {
+    "WhichListingType": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.listingType",
+          "StringEquals": "DISCOUNTED",
+          "Next": "WaitForSaleDeadline"
+        }
+      ],
+      "Default": "WaitForCollectionDeadline"
+    },
+    "WaitForSaleDeadline": {
+      "Type": "Wait",
+      "TimestampPath": "$.saleDeadline",
+      "Next": "CheckInventory"
+    },
+    "CheckInventory": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CheckInventoryFunctionArn}",
+        "Payload": { "listingId.$": "$.listingId" }
+      },
+      "ResultSelector": {
+        "remaining.$": "$.Payload.remaining",
+        "eligibleForDonation.$": "$.Payload.eligibleForDonation",
+        "reason.$": "$.Payload.reason"
+      },
+      "ResultPath": "$.inventory",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "WaitForCollectionDeadline" }
+      ],
+      "Next": "ShouldConvertToDonation"
+    },
+    "ShouldConvertToDonation": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            { "Variable": "$.autoDonateRemaining", "BooleanEquals": true },
+            { "Variable": "$.inventory.eligibleForDonation", "BooleanEquals": true }
+          ],
+          "Next": "ConvertToDonation"
+        }
+      ],
+      "Default": "WaitForCollectionDeadline"
+    },
+    "ConvertToDonation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ConvertToDonationFunctionArn}",
+        "Payload": { "listingId.$": "$.listingId" }
+      },
+      "ResultSelector": {
+        "converted.$": "$.Payload.converted",
+        "quantity.$": "$.Payload.quantity",
+        "donationDeadline.$": "$.Payload.donationDeadline"
+      },
+      "ResultPath": "$.conversion",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "WaitForCollectionDeadline" }
+      ],
+      "Next": "WaitForDonationDeadline"
+    },
+    "WaitForDonationDeadline": {
+      "Type": "Wait",
+      "TimestampPath": "$.conversion.donationDeadline",
+      "Next": "ExpireListing"
+    },
+    "WaitForCollectionDeadline": {
+      "Type": "Wait",
+      "TimestampPath": "$.collectionDeadline",
+      "Next": "ExpireListing"
+    },
+    "ExpireListing": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ExpireListingFunctionArn}",
+        "Payload": { "listingId.$": "$.listingId" }
+      },
+      "ResultSelector": { "result.$": "$.Payload" },
+      "ResultPath": "$.expiry",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 8,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    }
+  }
+}
