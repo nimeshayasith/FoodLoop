@@ -9,6 +9,10 @@ away and more people can afford to eat well.
 
 Built for the AWS Builder Center weekend challenge **"No Pipeline, No Problem"**: serverless services only, deployed by hand with the SAM CLI.
 
+**Live demo:** https://de9dfsc26bz0s.cloudfront.net · **Docs:** [`docs/PROJECT_DOCUMENTATION.md`](docs/PROJECT_DOCUMENTATION.md) · **Article draft:** [`docs/ARTICLE_DRAFT.md`](docs/ARTICLE_DRAFT.md) · **Smoke test:** [`docs/SMOKE_TEST_REPORT.md`](docs/SMOKE_TEST_REPORT.md)
+
+![FoodLoop browse page](docs/screenshots/02-browse-en.png)
+
 ## What it does
 - **Smart Deals** - discounted surplus with a sale deadline; shoppers reserve online and pay at the store.
 - **Free Donations** - verified charities and community groups reserve free food.
