@@ -188,6 +188,7 @@ aws stepfunctions list-executions --state-machine-arn <StateMachineArn output>
 - **Image upload fails:** check the browser network tab for the S3 POST response; the policy allows only JPG/PNG/WebP up to 3 MB.
 - **401 on every call:** the app sends the Cognito **ID token**; the authorizer audience is the app client id from the stack outputs.
 - **Workflow never converts:** the listing needs `autoDonateRemaining` true, stock left, and `donationDeadline` after the sale and before best-before. Look at the execution's `CheckInventory` output `reason`.
+- **Windows (Git Bash):** `deploy.sh` sets `MSYS_NO_PATHCONV=1` so CloudFront paths like `/index.html` are not rewritten. Run the seed script with `python scripts/seed.py ...` after `pip install boto3`.
 - **Admin page missing:** run `./scripts/make-admin.sh <email>`, then sign out and in (the group is in the token).
 
 ## 8. Known limitations (be upfront about these in the article)

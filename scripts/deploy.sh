@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 STACK="${STACK:-foodloop}"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-ap-south-1}}"
 export SAM_CLI_TELEMETRY=0
+export MSYS_NO_PATHCONV=1   # Git Bash on Windows would otherwise rewrite "/index.html" into "C:/Program Files/Git/index.html"
 
 echo "==> Backend: sam build + deploy ($STACK in $REGION)"
 sam build
@@ -32,7 +33,8 @@ BUCKET="$(out FrontendBucketName)"
 aws s3 sync frontend/dist "s3://$BUCKET" --delete --exclude index.html \
   --cache-control "public,max-age=31536000,immutable"
 aws s3 cp frontend/dist/index.html "s3://$BUCKET/index.html" --cache-control "no-cache" --content-type "text/html"
-aws cloudfront create-invalidation --distribution-id "$(out DistributionId)" --paths "/index.html" >/dev/null
+aws cloudfront create-invalidation --distribution-id "$(out DistributionId)" --paths "/index.html" >/dev/null \
+  || echo "warning: CloudFront invalidation failed (harmless on a first deploy; the site is still updated)"
 
 echo
 echo "FoodLoop is live:  $(out SiteUrl)"
