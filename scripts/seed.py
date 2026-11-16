@@ -13,6 +13,7 @@ import json
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import boto3
 
@@ -27,8 +28,11 @@ USERS = {
 }
 
 
+CLOCK_OFFSET = timedelta(0)  # server time minus this machine's clock, measured at start (a wrong PC clock must not break the demo)
+
+
 def iso(minutes):
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (datetime.now(timezone.utc) + CLOCK_OFFSET + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def main():
@@ -76,6 +80,14 @@ def main():
         except urllib.error.HTTPError as e:
             raise SystemExit(f"\nAPI error {e.code} on POST {path}: {e.read().decode(errors='replace')}\n"
                              f"(this machine's UTC clock reads {iso(0)} - if that is wrong, fix the Windows clock and retry)")
+
+    global CLOCK_OFFSET
+    with urllib.request.urlopen(out["ApiUrl"] + "/stats") as r:
+        server_now = parsedate_to_datetime(r.headers["Date"])
+    CLOCK_OFFSET = server_now - datetime.now(timezone.utc)
+    if abs(CLOCK_OFFSET.total_seconds()) > 20:
+        print(f"  note: this PC's clock is {abs(CLOCK_OFFSET.total_seconds()):.0f}s "
+              f"{'behind' if CLOCK_OFFSET.total_seconds() > 0 else 'ahead of'} AWS; using AWS time. Please sync the Windows clock too.")
 
     tok = token("shop@foodloop.example")
     samples = [
