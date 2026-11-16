@@ -10,6 +10,7 @@ Step Functions workflow behave exactly as in production. DEMO PASSWORDS ONLY - n
 """
 import argparse
 import json
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -35,6 +36,7 @@ def main():
     ap.add_argument("--stack", default="foodloop")
     ap.add_argument("--region", default="ap-south-1")
     ap.add_argument("--demo", action="store_true", help="also publish a short-timer listing for the live Step Functions demo")
+    ap.add_argument("--demo-only", action="store_true", help="only publish a fresh short-timer demo listing (skip the 3 regular samples)")
     args = ap.parse_args()
 
     cfn = boto3.client("cloudformation", region_name=args.region)
@@ -68,8 +70,12 @@ def main():
     def post(path, body, tok):
         req = urllib.request.Request(out["ApiUrl"] + path, data=json.dumps(body).encode(), method="POST",
                                      headers={"Content-Type": "application/json", "Authorization": tok})
-        with urllib.request.urlopen(req) as r:
-            return json.load(r)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            raise SystemExit(f"\nAPI error {e.code} on POST {path}: {e.read().decode(errors='replace')}\n"
+                             f"(this machine's UTC clock reads {iso(0)} - if that is wrong, fix the Windows clock and retry)")
 
     tok = token("shop@foodloop.example")
     samples = [
@@ -82,7 +88,9 @@ def main():
         dict(listingType="DONATION", productName="Fruit & vegetable boxes", category="Fruits & vegetables", unit="box", totalQuantity=25,
              maxPerCustomer=25, collectionDeadline=iso(60 * 8), pickupInstructions="Ask for the community donations table."),
     ]
-    if args.demo:
+    if args.demo_only:
+        samples = []
+    if args.demo or args.demo_only:
         samples.append(dict(listingType="DISCOUNTED", productName="DEMO: end-of-day pastries", category="Bakery", unit="box", totalQuantity=20,
                             originalPrice=800, discountedPrice=400, maxPerCustomer=20, saleDeadline=iso(2), collectionDeadline=iso(3),
                             autoDonateRemaining=True, donationDeadline=iso(6)))
